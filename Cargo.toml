@@ -1,0 +1,83 @@
+[package]
+name = "polaris-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Uptime Polaris host monitoring agent"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+# rustls, not native-tls. native-tls pulls openssl-sys on Linux, which is C
+# code: it needs a cross C toolchain to build for another target and links
+# against the host's libssl, so no static binary and no Alpine. rustls is pure
+# Rust, which is what makes one binary run on every Linux.
+#
+# webpki-roots rather than the system store for the same reason - a scratch or
+# slim container has no /etc/ssl/certs to read.
+# 使用 rustls 而非 native-tls：后者在 Linux 引入 C 代码 openssl-sys，交叉构建需要 C 工具链，
+# 且链接主机 libssl，无法得到适用于 Alpine 的静态二进制。纯 Rust 的 rustls 使同一二进制可在各 Linux 上运行。
+# 同理使用 webpki-roots 而非系统证书库，因为精简或 scratch 容器没有 /etc/ssl/certs。
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "logging",
+    "tls12",
+    "ring",
+] }
+webpki-roots = "1.0.10"
+rustls-webpki = { version = "0.103.16", default-features = false }
+sysinfo = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.2"
+hex = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+futures-util = "0.3"
+# Geography uses a separate direct client; reporting keeps its configured proxy.
+# 地理信息使用独立直连客户端；上报仍使用已配置的代理。
+ureq = { version = "2.10", features = ["json", "proxy-from-env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks", "http2", "system-proxy"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+x509-parser = "0.18"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+socket2 = { version = "0.6", features = ["all"] }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["test-util"] }
+rcgen = "0.12"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[lib]
+name = "polaris_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "polaris-agent"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
+# Not `panic = "abort"`. The probe is built to survive on hosts where nothing
+# supervises it - a bare container with no systemd, no supervisord, no cron.
+# Unwinding is what lets the supervisor loop in main.rs catch a panic and
+# restart the sampler instead of the process vanishing until someone notices.
+# Costs a few KB; buys the only self-healing available in that environment.
+# 不使用 panic = "abort"：探针需在没有 systemd、supervisord 或 cron 的裸容器中存活。
+# 栈展开使 main.rs 的主管理循环能捕获 panic 并重启采样器，而不是让进程消失直至有人发现。
+# 它增加几 KB，却提供此环境中唯一可用的自愈方式。

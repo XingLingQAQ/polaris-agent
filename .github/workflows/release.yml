@@ -1,0 +1,95 @@
+name: Agent release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-x86_64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate tag and Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 1
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          [[ "v$version" == "$GITHUB_REF_NAME" ]] || { echo 'Cargo version and tag differ' >&2; exit 1; }
+      - if: startsWith(matrix.platform, 'linux-')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=''; [[ '${{ matrix.platform }}' != windows-* ]] || ext='.exe'
+          mkdir -p release
+          cp 'target/${{ matrix.target }}/release/polaris-agent'"$ext" 'release/polaris-agent-'"${GITHUB_REF_NAME#v}"'-${{ matrix.platform }}'"$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Create manifest
+        run: node scripts/release-manifest.mjs release
+      - name: Create and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes release/*
+          gh release edit "$GITHUB_REF_NAME" --draft=false
