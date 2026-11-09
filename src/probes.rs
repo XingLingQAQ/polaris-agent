@@ -96,9 +96,8 @@ pub async fn run(mut cfg: Config, signals: mpsc::Sender<Signal>) {
     let (result_tx, result_rx) = mpsc::channel(MAX_QUEUE);
     tokio::spawn(upload_loop(control_client.clone(), results_url, result_rx));
     let (command_tx, command_rx) = mpsc::channel(MAX_QUEUE);
-    // Started before the first poll so an answer can still be sent when the
-    // main loop has already gone: the exit is signalled, never performed here.
-    // 首次轮询前启动上传循环；此处只发送退出信号，确保主循环退出前仍可上报结果。
+    // 命令回执独立上传；退出请求交由主循环处理。
+    // Upload command receipts independently; the main loop handles exit requests.
     tokio::spawn(upload_loop(
         control_client.clone(),
         commands_url,
@@ -199,9 +198,8 @@ async fn run_command(
         let _ = results.send(PendingCommand::report(body)).await;
         return false;
     }
-    // Queued before the exit is signalled: the main loop waits on this receipt,
-    // so the answer is on the wire before the process it describes goes away.
-    // 先排队结果再发送退出信号；主循环等待回执，确保进程退出前结果已发送。
+    // 先排队回执再请求退出；主循环最多等待 EXIT_DELIVERY_GRACE，并不保证送达。
+    // Queue the receipt before requesting exit; the main loop waits up to EXIT_DELIVERY_GRACE without guaranteeing delivery.
     let (delivered, receipt) = oneshot::channel();
     if results
         .send(PendingCommand::report_then(body, delivered))
@@ -218,9 +216,8 @@ async fn run_command(
 /// 返回命令结果及其生效是否需要退出进程。
 async fn run_update(command: &Command, cfg: &Config) -> (CommandResultBody, bool) {
     let update_config = cfg.clone();
-    // The download is blocking ureq I/O and can take a while on a slow link;
-    // on the runtime it would stall every other task's timer.
-    // 下载使用阻塞 ureq I/O；直接在运行时执行会阻塞其他任务的定时器。
+    // 同步下载放到阻塞线程池，避免占用异步执行线程。
+    // Move synchronous downloads to the blocking pool to avoid occupying an async worker.
     let outcome =
         tokio::task::spawn_blocking(move || crate::updater::update_running(&update_config)).await;
     match outcome {
@@ -301,12 +298,8 @@ where
     }
 }
 
-/// An answer the server still owes a lease for.
-///
-/// Both kinds share one queue because both obey the same rule: a rejected
-/// upload is kept and retried until the server accepts it or says the lease is
-/// gone.
-/// 尚需服务端确认租约的结果；两类结果共用队列，直到接受或租约失效才停止重试。
+/// 探测结果与命令回执共用上传策略，各自使用独立队列。
+/// Probe results and command receipts share an upload policy, with separate queues.
 trait Reportable: serde::Serialize + Send + 'static {
     fn ack(body: &[u8]) -> Result<()>;
 
@@ -454,6 +447,8 @@ async fn execute(client: &reqwest::Client, job: Job) -> Option<ResultBody> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
+    // 从剩余租约中预留一秒，再限制主检查和附加检查的共同截止时间。
+    // Reserve one second from the remaining lease, then bound the shared primary and add-on deadline.
     let budget = job.timeout_ms.min(
         job.lease_expires_at
             .saturating_sub(now_ms)

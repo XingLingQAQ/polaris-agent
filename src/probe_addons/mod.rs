@@ -72,6 +72,8 @@ pub struct AddonResults {
     pub dns: Option<AddonResult>,
 }
 
+// 并行附加检查共用绝对截止时间，各自失败保留为独立读数。
+// Run add-ons concurrently under one absolute deadline, retaining failures as separate readings.
 pub async fn run(
     client: &reqwest::Client,
     requested: &AddonRequest,

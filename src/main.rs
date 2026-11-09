@@ -126,13 +126,8 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Wait for the next command signal.
-///
-/// A closed channel means the probes task has stopped - it gives up when it
-/// cannot resolve its own URLs. Parking instead of returning keeps the
-/// session's other arms live; this future simply never fires again.
-/// 等待下一条命令信号。通道关闭表示探针任务因无法解析自身 URL 而停止；
-/// 保持等待而非返回，可让会话其他分支继续运行，此 future 不会再次触发。
+/// 通道关闭后保持挂起，避免 select! 重复选择已结束的信号源。
+/// Stay pending after channel closure so select! cannot repeatedly select an exhausted signal source.
 async fn next_signal(rx: &mut tokio::sync::mpsc::Receiver<Signal>) -> Signal {
     match rx.recv().await {
         Some(signal) => signal,
@@ -140,14 +135,8 @@ async fn next_signal(rx: &mut tokio::sync::mpsc::Receiver<Signal>) -> Signal {
     }
 }
 
-/// Hold the process open until the command's answer reaches the server.
-///
-/// A server that never learns the restart happened still holds the lease and
-/// can re-issue the command to the agent it just restarted, so the receipt is
-/// worth waiting for. It is not worth waiting forever: a server that cannot be
-/// reached must not be able to veto an operator's restart.
-/// 保持进程运行，直到命令结果送达服务器。若服务器不知道重启已发生，会继续持有租约并可能
-/// 再次向刚重启的 Agent 下发命令，因此值得等待回执；但不能无限等待，让断网阻止操作员重启。
+/// 退出前有限等待命令回执；超时或发送方关闭后仍继续退出。
+/// Bound the wait for a command receipt before exit; continue after timeout or sender closure.
 async fn wait_for_delivery(receipt: tokio::sync::oneshot::Receiver<()>) {
     if tokio::time::timeout(EXIT_DELIVERY_GRACE, receipt)
         .await
@@ -157,9 +146,8 @@ async fn wait_for_delivery(receipt: tokio::sync::oneshot::Receiver<()>) {
     }
 }
 
-/// One last attempt to deliver what is queued, so a clean stop does not
-/// discard the final samples.
-/// 最后尝试发送队列，避免正常停止时丢失末尾采样。
+/// 尝试发送剩余报告；未确认的帧放回内存队列。
+/// Attempt to flush remaining reports; restore unacknowledged frames to the in-memory queue.
 async fn flush_http(pending: &mut FrameQueue, http: &HttpTransport) {
     if pending.is_empty() {
         return;
@@ -223,8 +211,8 @@ enum Transport {
     Http,
 }
 
-/// Never returns unless the process is asked to stop.
-/// 持续运行，直到收到停止请求。
+/// 跨传输会话保留采样器、最新快照与已完成的分钟汇总。
+/// Retain the sampler, latest snapshot, and finalized minute summaries across transport sessions.
 struct SamplingState {
     aggregator: sysstat::MinuteAggregator,
     finalized: VecDeque<sysstat::FinalizedAggregate>,
@@ -660,6 +648,26 @@ fn acknowledge_summaries(finalized: &mut VecDeque<sysstat::FinalizedAggregate>, 
     }
 }
 
+// 发送失败保留上次身份确认时间，后续周期仍可重试。
+// Preserve the previous identity timestamp on failure so later ticks can retry.
+async fn handle_re_report(
+    cfg: &Config,
+    extras: &sysstat::AgentExtras,
+    http: &HttpTransport,
+) -> anyhow::Result<Option<tokio::time::Instant>> {
+    let basic = rpc::protocol::build_basic_report(extras, "http", cfg.report_interval_secs)?;
+    match http.send(&basic).await {
+        Ok(()) => {
+            info!("re_report command: posted a fresh basicReport");
+            Ok(Some(tokio::time::Instant::now()))
+        }
+        Err(err) => {
+            warn!(err = %err, "http: re_report basicReport failed");
+            Ok(None)
+        }
+    }
+}
+
 /// HTTP reporting retries queued frames on later report ticks.
 /// Identity is retried until acknowledged and refreshed daily; finalized summaries can backfill minute history.
 /// HTTP 上报在后续周期重试队列；身份确认前持续重试并每日刷新，分钟汇总可用于回填。
@@ -754,14 +762,7 @@ async fn session_http(
                     return Ok(SessionEnd::Reconfigured(request));
                 }
                 Signal::ReReport => {
-                    let basic = rpc::protocol::build_basic_report(extras, "http", cfg.report_interval_secs)?;
-                    match http.send(&basic).await {
-                        Ok(()) => {
-                            last_basic_report = Some(tokio::time::Instant::now());
-                            info!("re_report command: posted a fresh basicReport");
-                        }
-                        Err(err) => warn!(err = %err, "http: re_report basicReport failed"),
-                    }
+                    last_basic_report = handle_re_report(cfg, extras, http).await?.or(last_basic_report);
                     continue;
                 }
                 Signal::Exit(receipt) => {

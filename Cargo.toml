@@ -8,16 +8,8 @@ description = "Uptime Polaris host monitoring agent"
 
 [dependencies]
 tokio = { version = "1.38", features = ["full"] }
-# rustls, not native-tls. native-tls pulls openssl-sys on Linux, which is C
-# code: it needs a cross C toolchain to build for another target and links
-# against the host's libssl, so no static binary and no Alpine. rustls is pure
-# Rust, which is what makes one binary run on every Linux.
-#
-# webpki-roots rather than the system store for the same reason - a scratch or
-# slim container has no /etc/ssl/certs to read.
-# 使用 rustls 而非 native-tls：后者在 Linux 引入 C 代码 openssl-sys，交叉构建需要 C 工具链，
-# 且链接主机 libssl，无法得到适用于 Alpine 的静态二进制。纯 Rust 的 rustls 使同一二进制可在各 Linux 上运行。
-# 同理使用 webpki-roots 而非系统证书库，因为精简或 scratch 容器没有 /etc/ssl/certs。
+# 使用 rustls 和内置根证书，避免此 WebSocket 客户端依赖系统 OpenSSL 与证书目录。
+# Use rustls and bundled roots to avoid system OpenSSL and certificate-store dependencies in this WebSocket client.
 tokio-tungstenite = { version = "0.24", default-features = false, features = [
     "connect",
     "handshake",
@@ -73,11 +65,5 @@ opt-level = 3
 lto = "thin"
 strip = "symbols"
 codegen-units = 1
-# Not `panic = "abort"`. The probe is built to survive on hosts where nothing
-# supervises it - a bare container with no systemd, no supervisord, no cron.
-# Unwinding is what lets the supervisor loop in main.rs catch a panic and
-# restart the sampler instead of the process vanishing until someone notices.
-# Costs a few KB; buys the only self-healing available in that environment.
-# 不使用 panic = "abort"：探针需在没有 systemd、supervisord 或 cron 的裸容器中存活。
-# 栈展开使 main.rs 的主管理循环能捕获 panic 并重启采样器，而不是让进程消失直至有人发现。
-# 它增加几 KB，却提供此环境中唯一可用的自愈方式。
+# 保留栈展开，使 main.rs 能捕获 WebSocket 会话的 panic 并进入重连流程。
+# Keep unwinding so main.rs can catch WebSocket session panics and reconnect.

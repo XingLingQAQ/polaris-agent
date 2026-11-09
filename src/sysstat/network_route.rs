@@ -2,6 +2,8 @@ use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use std::net::{Ipv4Addr, UdpSocket};
 
+// 剔除本地与基准测试地址段，避免把 fake-IP 当作公网身份。
+// Reject local and benchmark address ranges so fake-IP addresses are not reported as public identities.
 pub(super) fn public_address(value: &str) -> Option<IpAddr> {
     let address: IpAddr = value.trim().parse().ok()?;
     let usable = match address {

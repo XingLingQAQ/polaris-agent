@@ -202,6 +202,8 @@ pub fn execute(installation: &Installation, args: ServiceArgs) -> Result<()> {
             .args(values)
             .status()
             .with_context(|| format!("cannot start {program}"))?;
+        // Task restart ignores a nonzero /End exit status and still tries /Run.
+        // 计划任务重启忽略 /End 的非零退出码，仍尝试 /Run。
         if !status.success() && !(index == 0 && commands.len() == 2) {
             bail!(
                 "{program} failed with {status}; check service permissions and installation state"
@@ -211,6 +213,8 @@ pub fn execute(installation: &Installation, args: ServiceArgs) -> Result<()> {
     Ok(())
 }
 
+// Tail lines from the final 1 MiB; follow appends and truncation on the same file handle.
+// 从末尾 1 MiB 内取尾行，跟随同一文件句柄的追加和截断。
 fn print_log(path: &std::path::Path, lines: u32, follow: bool) -> Result<()> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("cannot open log: {}", path.display()))?;

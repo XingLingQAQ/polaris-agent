@@ -30,6 +30,8 @@ fn bytes(text: &str, hex: bool) -> Result<Vec<u8>> {
     }
 }
 
+// 发送成功不代表探测成功；仍须收到响应，配置 expect 时还需匹配字节。
+// A successful send is insufficient; require a reply and match bytes when expect is configured.
 pub async fn udp(target: &str, options: &Value) -> Result<()> {
     let hex = options.get("encoding").and_then(Value::as_str) == Some("hex");
     let payload = bytes(

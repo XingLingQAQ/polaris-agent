@@ -62,6 +62,8 @@ impl RuntimeConfig {
         self.validate()?;
         anyhow::ensure!(valid_revision(revision), "invalid configuration revision");
         let current = Self::current(cfg);
+        // 显式 CLI 或环境变量配置优先，远程配置只能保持这些字段的当前值。
+        // Explicit CLI or environment settings take priority; remote updates must preserve their values.
         let locks = &cfg.runtime_overrides;
         let conflicts = [
             (locks.sample_interval && self.sample_interval_secs != current.sample_interval_secs, "sample_interval"),
@@ -154,6 +156,8 @@ impl Drop for CancelOnDrop {
     }
 }
 
+// 超时只取消未认领的配置；采样器已认领时继续等待，避免误报写入结果。
+// A timeout cancels only unclaimed updates; wait for a claimed update to avoid misreporting its commit.
 async fn wait_for_claim(state: &ClaimState, mut receipt: oneshot::Receiver<Completion>, timeout: Duration) -> Result<Completion> {
     match tokio::time::timeout(timeout, &mut receipt).await {
         Ok(result) => result.context("sampler configuration was interrupted"),
@@ -170,6 +174,8 @@ pub struct Reconfiguration {
 }
 
 impl Reconfiguration {
+    /// 仅认领未取消的配置；持久化成功后才交给采样器应用。
+    /// Claim only uncancelled updates; hand them to the sampler only after persistence succeeds.
     pub fn claim_and_commit(self) -> Option<(Box<Config>, oneshot::Sender<Result<(), String>>)> {
         if !self.state.claim() {
             return None;

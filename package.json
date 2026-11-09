@@ -1,0 +1,15 @@
+{
+  "name": "polaris-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-agent.mjs",
+    "fetch:zig": "node scripts/fetch-zig.mjs",
+    "manifest:merge": "node scripts/merge-agent-manifest.mjs",
+    "manifest:validate": "node scripts/validate-agent-manifest.mjs",
+    "test": "cargo test --locked --all-targets -- --test-threads=1 && npm run test:cli && npm run test:manifest && npm run test:windows",
+    "test:cli": "node tests/agent-cli.test.mjs",
+    "test:manifest": "node tests/agent-manifest.test.mjs",
+    "test:windows": "node tests/windows-update.test.mjs && node tests/windows-restart.test.mjs"
+  }
+}

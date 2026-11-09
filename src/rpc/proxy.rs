@@ -1,42 +1,10 @@
-//! Proxy support for the WebSocket transport.
+//! Proxy support for the WebSocket transport: an HTTP CONNECT tunnel honouring
+//! the standard `*_PROXY`/`NO_PROXY` variables.
 //!
-//! ## Why this is separate from the HTTP side
-//!
-//! `ureq` reads `HTTPS_PROXY` once the `proxy-from-env` feature is on, which
-//! covers the HTTP fallback with one flag. WebSocket has no such switch:
-//! `tokio-tungstenite` 0.21 takes a TLS `Connector` but no proxy, so the TCP
-//! connection has to be established first and the socket layered on top of it.
-//!
-//! That means an HTTP `CONNECT` tunnel, opened by hand. It is about sixty lines
-//! because the protocol is: send one request line and a `Host` header, read
-//! status line and headers back, and everything after that is the tunnel.
-//!
-//! ## What is honoured
-//!
-//! `HTTPS_PROXY` / `https_proxy` for a `wss:` endpoint and `HTTP_PROXY` /
-//! `http_proxy` for `ws:`, plus `ALL_PROXY` / `all_proxy` for either, and
-//! `NO_PROXY` / `no_proxy` to opt out. Upper case wins over lower, which is the
-//! convention every other client uses - curl, and `ureq` itself.
-//!
-//! This is deliberately a subset of `ureq`'s behaviour rather than a
-//! reimplementation of it: the same variables, the same precedence, so a host
-//! that reaches the server over HTTP also reaches it over the socket.
-//!
-//! ## Not implemented
-//!
-//! No `SOCKS` support. It needs a different handshake and a dependency of its
-//! own, and no environment on hand exercises it - so it is absent rather than
-//! claimed. A `socks5://` value is reported and ignored rather than silently
-//! failing to connect, which would look like a network fault.
-//!
-//! WebSocket 代理与 HTTP 侧分开处理：ureq 启用 proxy-from-env 后可读取 HTTPS_PROXY，
-//! 但 tokio-tungstenite 0.21 只接受 TLS Connector 而不支持代理，需先建立 TCP 连接再叠加 socket。
-//! 这里手动打开 HTTP CONNECT 隧道：发送请求行和 Host 头，读取状态行和响应头，之后的数据就是隧道。
-//! wss 使用 HTTPS_PROXY/https_proxy，ws 使用 HTTP_PROXY/http_proxy；两者都回退到 ALL_PROXY/all_proxy，
-//! NO_PROXY/no_proxy 用于排除。与 curl 和 ureq 的惯例一致，大写变量优先。
-//! 这里有意实现 ureq 行为的子集，变量与优先级保持一致，使 HTTP 可连接的主机也能使用 socket。
-//! 不支持 SOCKS：它需要另一套握手和依赖，且现无可测试环境；socks5:// 会被报告并忽略，
-//! 而不是静默连接失败并表现为网络故障。
+//! `ureq` covers the HTTP fallback through `proxy-from-env`; `tokio-tungstenite`
+//! takes no proxy, so the TCP connection is established first and TLS/WebSocket
+//! run on top. SOCKS is not implemented and is reported, not silently ignored.
+//! WebSocket 代理需要先建 CONNECT 隧道；不支持 SOCKS，遇到会明确报告。
 
 use std::{fmt, io};
 
@@ -69,12 +37,7 @@ impl fmt::Debug for Proxy {
 }
 
 impl Proxy {
-    /// The proxy for `target`, or `None` when one is not configured or excluded.
-    ///
-    /// `wss:` / `https:` use `HTTPS_PROXY`; `ws:` / `http:` use `HTTP_PROXY`.
-    /// `ALL_PROXY` covers either when no scheme-specific value applies.
-    /// 获取目标使用的代理；未配置或被排除时返回 None。wss/https 使用 HTTPS_PROXY，
-    /// ws/http 使用 HTTP_PROXY；无协议专属值时才使用 ALL_PROXY。
+    /// Proxy for `target`, or `None` when not configured or excluded. / 目标的代理；未配置或排除时为 `None`。
     pub fn for_url(target: &Url) -> Option<Self> {
         let host = target.host_str()?;
 
@@ -117,24 +80,7 @@ impl Proxy {
         None
     }
 
-    /// Parse a proxy URL. `Ok(None)` means a scheme this does not implement.
-    ///
-    /// ## Why `https://` is refused rather than half-supported
-    ///
-    /// A tunnel to an `https://` proxy needs TLS to the *proxy itself*, before
-    /// the CONNECT is sent - a second TLS layer under the endpoint's own. This
-    /// implementation has one, so accepting `https://` would open a **plain
-    /// TCP** connection and send `Proxy-Authorization` across it in the clear:
-    /// the credential would be wrong to send and the operator would have no
-    /// reason to suspect it was.
-    ///
-    /// Refusing it is the honest answer. Nearly every proxy in a `*_PROXY`
-    /// variable is `http://`, and the caller logs the refusal instead of
-    /// appearing to honour a setting it does not.
-    /// 解析代理 URL；不支持的协议返回 Ok(None)。HTTPS 代理在发送 CONNECT 前需要先与代理
-    /// 建立 TLS，再在上层与端点建立第二层 TLS。此实现只有一层；若接受 https://，将通过明文 TCP
-    /// 发送 Proxy-Authorization，导致凭据泄露且操作员难以察觉。*_PROXY 通常使用 http://；
-    /// 此处明确拒绝 HTTPS，调用方会记录原因，而非假装支持。
+    /// Parse a proxy URL; `Ok(None)` for unsupported schemes. `https://` is refused because TLS-to-proxy would send credentials in the clear. / 解析代理 URL；不支持的 scheme 返回 `Ok(None)`。拒绝 `https://`，否则凭据会明文发送。
     fn parse(raw: &str) -> Result<Option<Self>> {
         // A bare `host:port` is common in the wild and every other client
         // accepts it, so it is accepted here rather than rejected.
@@ -193,14 +139,7 @@ impl Proxy {
         ureq::Proxy::new(&self.proxy_url).context("invalid selected HTTP proxy")
     }
 
-    /// Open a tunnel to `target` and hand back the connected stream.
-    ///
-    /// The returned `TcpStream` is positioned immediately after the proxy's
-    /// response headers, so it is the target's connection as far as the caller
-    /// is concerned - TLS and the WebSocket handshake both proceed on it
-    /// unchanged.
-    /// 打开目标隧道并返回连接流。TcpStream 位于代理响应头之后，对调用方而言即目标连接，
-    /// TLS 和 WebSocket 握手可不作修改地继续进行。
+    /// Open a CONNECT tunnel and return the stream positioned after the proxy headers. / 建立 CONNECT 隧道，返回定位在代理响应头之后的流。
     pub async fn connect_tunnel(&self, target: &Url) -> Result<TcpStream> {
         let Some(host) = target.host_str() else {
             bail!("the endpoint URL has no host to tunnel to");
@@ -255,15 +194,7 @@ impl Proxy {
     }
 }
 
-/// Read the proxy's response headers, returning the status code.
-///
-/// Read a byte at a time rather than into a buffer: the response ends at the
-/// first blank line, and anything read past it would be the start of the
-/// tunnelled TLS handshake - which cannot be put back into the stream. A
-/// buffered read would swallow the server's first bytes and the handshake would
-/// fail with a misleading error.
-/// 逐字节读取代理响应头并返回状态码：第一个空行即响应结束，继续读取的数据属于隧道 TLS 握手，
-/// 无法放回流中。缓冲读取会吞掉服务器的首批字节，导致握手失败且报错具有误导性。
+/// Read proxy response headers byte by byte; buffering would swallow the TLS handshake start. / 逐字节读取代理响应头；缓冲会吞掉 TLS 握手开头。
 async fn read_connect_response(stream: &mut TcpStream) -> Result<u16> {
     let mut head = Vec::with_capacity(256);
     let mut byte = [0u8; 1];
@@ -303,15 +234,7 @@ async fn read_connect_response(stream: &mut TcpStream) -> Result<u16> {
     Ok(status)
 }
 
-/// Whether `NO_PROXY` excludes this host.
-///
-/// Supports the forms that appear in practice: `*` for everything, an exact
-/// host, a `.suffix` or bare `suffix` for a domain and its subdomains, and an
-/// optional `:port` which is ignored here because the decision is per-host -
-/// matching the port too would silently stop excluding a host whose port
-/// changed.
-/// 判断 NO_PROXY 是否排除此主机：支持 *、精确主机、带点或不带点的域名后缀及其子域名。
-/// 可选的 :port 在此忽略，因为按主机决定；若同时匹配端口，端口变化会悄悄取消对该主机的排除。
+/// `NO_PROXY` match: `*`, exact host, or domain suffix; port is ignored. / `NO_PROXY` 匹配：`*`、精确主机或域名后缀；忽略端口。
 fn is_excluded(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
 
@@ -340,13 +263,7 @@ fn is_excluded(host: &str) -> bool {
     false
 }
 
-/// Minimal base64 for the `Proxy-Authorization` header.
-///
-/// Hand-rolled rather than adding a dependency for one header: the alphabet and
-/// padding are fixed by RFC 4648 and there is nothing here to get subtly wrong
-/// that a test would not catch.
-/// 为 Proxy-Authorization 实现最小 Base64 编码。只为一个请求头手写而非新增依赖：
-/// RFC 4648 固定了字符表与填充规则，细微错误可由测试发现。
+/// Minimal base64 for `Proxy-Authorization`. / `Proxy-Authorization` 用的最小 base64。
 fn base64(input: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -376,13 +293,7 @@ fn base64(input: &str) -> String {
     out
 }
 
-/// Rewrite a `connect` error so it names the proxy.
-///
-/// A refused tunnel surfaces as a TLS or IO error on the stream, which reads as
-/// "the server is broken". Saying which proxy was in the path is the difference
-/// between a five-minute diagnosis and an afternoon.
-/// 重写连接错误并标明代理。隧道被拒绝会表现为流上的 TLS 或 I/O 错误，容易误诊为服务器故障；
-/// 指明经过的代理可显著缩短排查时间。
+/// Rewrite a connect error so it names the proxy. / 改写连接错误，标明代理。
 pub fn describe_tunnel_failure(proxy: &Proxy, error: &io::Error) -> String {
     format!("through proxy {}:{}: {error}", proxy.host, proxy.port)
 }
@@ -427,32 +338,14 @@ mod tests {
         assert_eq!(p.port, 7890);
     }
 
-    /**
-     * The scheme's own default port, not a made-up one.
-     *
-     * `http://proxy.example.com` means port 80, which is what every other
-     * client would use. The first version of this test asserted 8080 - a value
-     * that appeared in the code as a fallback and was in fact unreachable,
-     * because `port_or_known_default()` already knows the port. The test was
-     * wrong about the behaviour, not the other way round.
-     *
-     * 使用协议自身的默认端口：HTTP 默认 80；port_or_known_default 已提供该值。
-     */
+    /** Use the scheme's default port, not a made-up fallback. / 使用 scheme 默认端口，不用自造的兜底值。 */
     #[test]
     fn uses_the_scheme_default_port() {
         let p = Proxy::parse("http://proxy.example.com").unwrap().unwrap();
         assert_eq!(p.port, 80);
     }
 
-    /**
-     * An `https://` proxy is refused, not silently downgraded.
-     *
-     * Honouring it would mean opening a plain TCP connection and sending the
-     * credentials over it in the clear. `None` makes the caller log the refusal
-     * and connect directly, which is a visible outcome rather than a quiet one.
-     *
-     * 拒绝 HTTPS 代理，避免明文发送凭据；返回 None 后调用方会记录并直接连接。
-     */
+    /** An `https://` proxy is refused, not silently downgraded. / 拒绝 `https://` 代理，不静默降级。 */
     #[test]
     fn refuses_an_https_proxy_rather_than_leaking_credentials() {
         assert!(Proxy::parse("https://proxy.example.com:3128")

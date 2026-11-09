@@ -447,6 +447,8 @@ fn run_version(path: &Path) -> Result<(bool, Vec<u8>)> {
 }
 
 #[cfg(unix)]
+// 校验暂存程序后保留硬链接备份，最后以重命名替换运行文件。
+// Validate the staged executable, retain a hard-link backup, then rename into place.
 fn install_unix(executable: &Path, bytes: &[u8], version: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 

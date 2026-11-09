@@ -59,33 +59,15 @@ impl AgentClient {
                     return Ok(Self { ws, next_id: 1 });
                 }
                 Ok(Err(failure)) => {
-                    // Only a handshake failure can be terminal. The two checks
-                    // below read the HTTP status the server answered with, which
-                    // exists only once the socket reached it. A DNS, TCP or
-                    // proxy-tunnel failure carries no status, so retrying is
-                    // exactly the right response - and treating one as "the
-                    // token is wrong" would send the operator to check a
-                    // credential that was never presented.
-                    // 只有握手失败可能是终止错误。下面两项检查读取服务器返回的 HTTP 状态，
-                    // 它只在 socket 到达服务器后存在；DNS、TCP 或代理隧道故障没有状态，应当重试。
-                    // 若误报令牌错误，会让操作员检查一个根本没有送达的凭据。
+                    // Only handshake failures are terminal; a status-bearing failure means the server was reached. / 只有握手失败才算终止；能拿到状态码说明已到达服务器。
                     if let ConnectFailure::Handshake(e) = &failure {
-                        // A refused token is terminal. Retrying a credential the
-                        // server already rejected burns the budget and hides the
-                        // real cause; the operator needs to know now.
-                        // 令牌被拒绝属于终止错误；重复尝试已被拒绝的凭据会浪费重试次数并掩盖真正原因，
-                        // 应立即告知操作员。
+                        // A rejected token is terminal; retrying hides the real cause. / Token 被拒绝即终止；重试只会掩盖原因。
                         if is_auth_rejection(e) {
                             anyhow::bail!(
                                 "server rejected the token (HTTP 401). Check --token against the console."
                             );
                         }
-                        // A 404 on the upgrade is also terminal in practice: the
-                        // endpoint does not exist, and hammering it will not make
-                        // it appear. Reported so the operator can see the URL is
-                        // wrong rather than watching it retry.
-                        // 升级返回 404 通常也属于终止错误：端点不存在，反复请求不会使其出现。
-                        // 报告此错误以提示操作员 URL 有误，而不是只看到不断重试。
+                        // A 404 on the upgrade means the endpoint is wrong; report it, do not retry. / 升级返回 404 表示端点错误；报告而不是重试。
                         if is_not_found(e) {
                             anyhow::bail!("no WebSocket endpoint (HTTP 404). Check --endpoint.");
                         }
@@ -206,9 +188,7 @@ impl AgentClient {
     }
 }
 
-/// A refused token, as opposed to a network failure. The handshake failure
-/// arrives as `Http(response)` and the worker answers a bad token with 401.
-/// 区分令牌拒绝与网络故障；握手失败以 Http(response) 返回，Worker 对错误令牌返回 401。
+/// Bad token: the server answers the handshake with 401. / Token 错误：服务端在握手时返回 401。
 fn is_auth_rejection(e: &tokio_tungstenite::tungstenite::Error) -> bool {
     use tokio_tungstenite::tungstenite::Error;
     match e {
@@ -229,14 +209,7 @@ fn is_not_found(e: &tokio_tungstenite::tungstenite::Error) -> bool {
     }
 }
 
-/// The rustls config for this connection.
-///
-/// Roots come from `webpki-roots` (compiled in) rather than the platform
-/// store: a container built `FROM scratch`, or any slim image without
-/// ca-certificates, has no `/etc/ssl/certs` to read, and that is exactly the
-/// environment this probe is meant to survive in.
-/// 此连接的 rustls 配置。根证书来自内置 webpki-roots 而非系统证书库：FROM scratch 容器或
-/// 未安装 ca-certificates 的精简镜像没有 /etc/ssl/certs，而探针需要在这些环境中工作。
+/// Compiled-in `webpki-roots`, because slim containers may have no CA store. / 使用编译内置根证书，因为精简容器可能没有 CA 存储。
 fn tls_connector(insecure: bool) -> Result<Connector> {
     if insecure {
         warn!("--insecure: TLS certificate verification is DISABLED");
@@ -344,16 +317,7 @@ impl std::fmt::Display for ConnectFailure {
     }
 }
 
-/// One connection attempt, direct or through a proxy.
-///
-/// The two paths differ in where the TCP connection comes from and nothing
-/// else, so the TLS and WebSocket layers are shared: both end up performing the
-/// same upgrade on a stream that is already talking to the endpoint. Keeping
-/// them together is what stops the proxy path from drifting away from the
-/// direct one - a second copy of the handshake is a second place for it to be
-/// wrong.
-/// 单次直连或代理连接；两条路径只在 TCP 连接来源上不同。两者都在已连接目标端点的流上
-/// 共用 TLS 和 WebSocket 升级流程，避免代理路径与直连路径出现分歧或重复握手代码出错。
+/// One connection attempt, direct or through a proxy; the TLS and WebSocket layers are shared. / 一次连接尝试，直连或经代理；TLS 和 WebSocket 层共用。
 async fn connect_once(url: &Url, cfg: &Config) -> Result<Ws, ConnectFailure> {
     let connector = tls_connector(cfg.insecure).map_err(ConnectFailure::Transport)?;
 
@@ -366,12 +330,7 @@ async fn connect_once(url: &Url, cfg: &Config) -> Result<Ws, ConnectFailure> {
             Ok(ws)
         }
         Some(proxy) => {
-            // The tunnel is opened first and TLS runs over it, so the
-            // certificate is still validated against the **endpoint's** name. A
-            // proxy sees the ClientHello and cannot impersonate the server
-            // without a certificate that fails that check.
-            // 隧道先建立，TLS 在隧道上运行，证书仍按目标端点名称验证。
-            // 代理能看到 ClientHello，但没有能通过该验证的证书就无法冒充服务端。
+            // TLS runs over the tunnel, so the certificate is still checked against the endpoint name. / TLS 在隧道上运行，证书仍按端点名称校验。
             let stream = proxy
                 .connect_tunnel(url)
                 .await

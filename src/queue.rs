@@ -35,6 +35,8 @@ impl FrameQueue {
         self.frames.push_back(frame);
     }
 
+    /// 尽量保留正在发送的队首帧；队列全被保留时仍淘汰最后一帧。
+    /// Preserve the in-flight prefix where possible; evict the last frame if the whole queue is reserved.
     pub fn push_reserving_prefix(&mut self, frame: RpcRequest, reserved: usize) -> bool {
         let replaced = self.frames.len() == self.capacity;
         if replaced {
@@ -140,11 +142,8 @@ mod tests {
         let mut q = FrameQueue::new(2);
         q.restore_front(vec![frame(1), frame(2), frame(3)]);
         assert_eq!(q.len(), 2, "restore must not exceed the bound");
-        // The *newest* two survive. Dropping from the front is what keeps the
-        // bound costing the oldest frame rather than the freshest - the wrong
-        // end here is invisible until an outage, when the newest reading is
-        // exactly what the badge should show.
-        // 仅保留最新两帧，从队首丢弃最旧帧；故障时状态标记需要最新读数。
+        // 容量不足时淘汰旧帧，保留最新两帧。
+        // Evict older frames on overflow, keeping the newest two.
         let got: Vec<u64> = q.take().iter().map(n_of).collect();
         assert_eq!(got, vec![2, 3]);
     }
