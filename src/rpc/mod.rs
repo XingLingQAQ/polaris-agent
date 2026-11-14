@@ -7,6 +7,7 @@
 //! ```
 //! Worker 要求严格的 JSON-RPC 2.0 封装。
 
+pub mod capabilities;
 pub mod endpoint;
 pub mod http;
 pub mod protocol;

@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::interval;
 
 use anyhow::{Context as _, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -21,7 +20,6 @@ use crate::config::Config;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -282,20 +280,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-/// Background keep-alive task: ping every 30 s. Spawns into tokio runtime.
-/// 在 Tokio 中启动后台保活任务，每 30 秒发送 Ping。
-#[allow(dead_code)]
-pub fn spawn_keepalive(mut ws: Ws) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = interval(KEEPALIVE_INTERVAL);
-        loop {
-            tick.tick().await;
-            if ws.send(Message::Ping(Vec::new())).await.is_err() {
-                break;
-            }
-        }
-    })
-}
+
 
 /** Only handshake failures carry an HTTP status for credential/endpoint rejection checks. / 只有握手失败包含可用于判断凭据或端点拒绝的 HTTP 状态。 */
 #[derive(Debug)]
@@ -361,6 +346,7 @@ mod tests {
             token: "abc123".to_string(),
             sample_interval_secs: 5,
             report_interval_secs: 60,
+            report_interval_explicit: false,
             insecure: false,
             include_nics: vec![],
             exclude_nics: vec![],
@@ -384,6 +370,7 @@ mod tests {
             token: "from_flag".to_string(),
             sample_interval_secs: 5,
             report_interval_secs: 60,
+            report_interval_explicit: false,
             insecure: false,
             include_nics: vec![],
             exclude_nics: vec![],

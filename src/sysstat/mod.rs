@@ -300,30 +300,7 @@ fn matches_filter(value: &str, pattern: &str) -> bool {
     }
 }
 
-#[allow(dead_code)]
-fn pick_primary_disk(disks: &Disks) -> (u64, u64) {
-    let mut total = 0u64;
-    let mut used = 0u64;
-    let mut biggest: Option<(u64, u64)> = None;
 
-    for d in disks.iter() {
-        let t = d.total_space();
-        let avail = d.available_space();
-        if t == 0 {
-            continue;
-        }
-        let u = t.saturating_sub(avail);
-        if biggest.map(|(bt, _)| t > bt).unwrap_or(true) {
-            biggest = Some((t, u));
-        }
-        total = total.saturating_add(t);
-        used = used.saturating_add(u);
-    }
-
-    // 返回最大一块盘的容量,而不是求和,更接近 Komari 单盘语义
-    // Return the largest disk rather than the sum, closer to Komari's single-disk semantics.
-    biggest.unwrap_or((total, used))
-}
 
 #[cfg(target_os = "linux")]
 fn count_connections() -> (u64, u64) {

@@ -306,7 +306,7 @@ mod tests {
     fn fixture_config(path: std::path::PathBuf) -> Config {
         Config {
             endpoint: "https://example.test".into(), token: "fixture".into(),
-            sample_interval_secs: 5, report_interval_secs: 60, insecure: false,
+            sample_interval_secs: 5, report_interval_secs: 60, report_interval_explicit: false, insecure: false,
             include_nics: vec![], exclude_nics: vec![], include_mounts: vec![], exclude_mounts: vec![],
             auto_update: false, log_file: None, service_tier: None,
             config_path: path, runtime_overrides: Default::default(),

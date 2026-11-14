@@ -111,6 +111,9 @@ pub struct Config {
     pub token: String,
     pub sample_interval_secs: u64,
     pub report_interval_secs: u64,
+    /// Whether report_interval came from CLI, environment, or config.json.
+    /// report_interval 是否由命令行、环境变量或 config.json 显式指定。
+    pub report_interval_explicit: bool,
     pub insecure: bool,
     pub include_nics: Vec<String>,
     pub exclude_nics: Vec<String>,
@@ -169,6 +172,10 @@ impl Config {
         let env_report = env::var("POLARIS_AGENT_REPORT_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok());
+        // 显式上报周期不随后端类型调整；仅默认值由探测结果决定。
+        // An explicit report interval is never reshaped by the backend type; only the default follows discovery.
+        let report_interval_explicit =
+            args.report_interval.is_some() || env_report.is_some() || file_cfg.report_interval.is_some();
         let (sample_interval_secs, report_interval_secs) = resolve_intervals(
             args.sample_interval,
             env_sample,
@@ -217,6 +224,7 @@ impl Config {
             token,
             sample_interval_secs,
             report_interval_secs,
+            report_interval_explicit,
             insecure,
             include_nics,
             exclude_nics,
@@ -314,10 +322,11 @@ fn resolve_intervals(
     env_report: Option<u64>,
     file_report: Option<u64>,
 ) -> (u64, u64) {
-    (
-        cli_sample.or(env_sample).or(file_sample).unwrap_or(5),
-        cli_report.or(env_report).or(file_report).unwrap_or(60),
-    )
+    let sample = cli_sample.or(env_sample).or(file_sample).unwrap_or(5);
+    // 未显式指定上报周期时，默认值不低于采样周期，避免长采样周期无法启动。
+    // Without an explicit report interval, the default never falls below the sample interval.
+    let report = cli_report.or(env_report).or(file_report).unwrap_or_else(|| 60.max(sample));
+    (sample, report)
 }
 
 fn merge_insecure(cli: Option<bool>, file: Option<bool>) -> bool {
@@ -359,6 +368,24 @@ mod tests {
         assert!(cfg.runtime_overrides.sample_interval);
         assert!(cfg.runtime_overrides.include_nics);
         assert!(cfg.runtime_overrides.auto_update);
+        assert!(!cfg.report_interval_explicit);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn file_report_interval_counts_as_explicit() {
+        let mut random = [0u8; 16];
+        getrandom::getrandom(&mut random).unwrap();
+        let directory = std::env::temp_dir().join(format!("polaris-config-{}", hex::encode(random)));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.json");
+        std::fs::write(&path, br#"{"endpoint":"https://example.test","token":"fixture","report_interval":90}"#).unwrap();
+        let args = CliArgs::try_parse_from([
+            "polaris-agent", "run", "--config", path.to_str().unwrap(),
+        ]).unwrap();
+        let cfg = Config::from_args(args).unwrap();
+        assert_eq!(cfg.report_interval_secs, 90);
+        assert!(cfg.report_interval_explicit);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -417,6 +444,28 @@ mod tests {
             resolve_intervals(None, None, None, None, None, None),
             (5, 60)
         );
+        assert_eq!(
+            resolve_intervals(Some(90), None, None, None, None, None),
+            (90, 90)
+        );
+    }
+
+    #[test]
+    fn long_sample_interval_builds_with_a_matching_default_report_interval() {
+        let mut random = [0u8; 16];
+        getrandom::getrandom(&mut random).unwrap();
+        let directory = std::env::temp_dir().join(format!("polaris-config-{}", hex::encode(random)));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.json");
+        std::fs::write(&path, br#"{"endpoint":"https://example.test","token":"fixture","sample_interval":90}"#).unwrap();
+        let args = CliArgs::try_parse_from([
+            "polaris-agent", "run", "--config", path.to_str().unwrap(),
+        ]).unwrap();
+        let cfg = Config::from_args(args).unwrap();
+        assert_eq!(cfg.sample_interval_secs, 90);
+        assert_eq!(cfg.report_interval_secs, 90);
+        assert!(!cfg.report_interval_explicit);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

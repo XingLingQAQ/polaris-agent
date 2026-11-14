@@ -31,7 +31,7 @@ pa logs -f
 
 ### 配置与更新
 
-连接地址和机器 Token 保存在安装配置里。优先级从高到低：命令行参数、环境变量、JSON 文件。采样和上报间隔必须满足 `1 <= sample_interval <= report_interval <= 1800`，单位秒。
+连接地址和机器 Token 保存在安装配置里。优先级从高到低：命令行参数、环境变量、JSON 文件。采样和上报间隔必须满足 `1 <= sample_interval <= report_interval <= 1800`，单位秒。连接站点后按后端自动选择默认上报周期：Worker 为 60 秒，Go 为采样间隔；显式配置优先，探测失败时保持 60 秒。
 
 `pa update` 检查并安装更新；`pa rollback` 使用本机保留的上一份二进制。托管安装可以开启自动更新，默认关闭；Docker 通过替换容器更新。
 
@@ -60,7 +60,7 @@ Use `pa status`, `pa start`, `pa stop`, `pa restart` and `pa logs -f`. Available
 
 ### Configure and update
 
-The installation configuration stores the endpoint and machine token. Precedence is CLI flags, then environment variables, then JSON. Intervals are in seconds and satisfy `1 <= sample_interval <= report_interval <= 1800`.
+The installation configuration stores the endpoint and machine token. Precedence is CLI flags, then environment variables, then JSON. Intervals are in seconds and satisfy `1 <= sample_interval <= report_interval <= 1800`. After connecting, the default cadence follows the backend: 60 seconds on Worker and the sample interval on Go; explicit configuration wins and a failed probe keeps 60 seconds.
 
 `pa update` checks for updates; `pa rollback` uses the previous binary retained on the machine. Managed installations can opt into automatic updates, off by default. Docker updates replace the container.
 

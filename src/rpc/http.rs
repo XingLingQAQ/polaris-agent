@@ -70,9 +70,7 @@ impl HttpTransport {
         Ok(statuses[0])
     }
 
-    pub async fn send_batch(&self, reqs: &[RpcRequest]) -> Result<()> {
-        if self.send_batch_status(reqs).await?.into_iter().all(|delivered| delivered) { Ok(()) } else { anyhow::bail!("report deferred") }
-    }
+
 
     pub async fn send_batch_status(&self, reqs: &[RpcRequest]) -> Result<Vec<bool>> {
         if self.insecure_https {

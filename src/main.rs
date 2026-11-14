@@ -175,8 +175,25 @@ async fn main() -> anyhow::Result<()> {
     // 在可能阻塞的操作前安装处理器，及时响应启动期间的停止请求。
     shutdown::install();
     let args = CliArgs::parse();
-    let Some(cfg) = polaris_agent::cli::dispatch(args)? else { return Ok(()); };
+    let Some(mut cfg) = polaris_agent::cli::dispatch(args)? else { return Ok(()); };
     polaris_agent::cli::initialize_logging(cfg.log_file.clone())?;
+
+    // The Worker batches a minute; the Go server expects every sample. Ask the
+    // backend which it is before the first sample so the cadence is right from
+    // the start; a failed probe keeps the default and must not stop the agent.
+    // Worker 按分钟批量上报，Go 服务端要求逐样本上报。首次采样前先确认部署类型；
+    // 探测失败时保留默认周期，且不得阻止 Agent 启动。
+    let runtime = match polaris_agent::rpc::capabilities::discover(&cfg).await {
+        Ok(runtime) => {
+            info!(runtime = runtime.as_str(), "backend runtime discovered");
+            Some(runtime)
+        }
+        Err(err) => {
+            warn!(err = %err, "backend runtime discovery failed; keeping the default report interval");
+            None
+        }
+    };
+    polaris_agent::rpc::capabilities::apply_reporting_runtime(&mut cfg, runtime);
 
     info!(
         token_len = cfg.token.len(),
@@ -1019,7 +1036,7 @@ mod tests {
         });
         let cfg = Config {
             endpoint: format!("ws://{address}"), token: "fixture".into(), sample_interval_secs: 5,
-            report_interval_secs: 60, insecure: false, include_nics: vec![], exclude_nics: vec![],
+            report_interval_secs: 60, report_interval_explicit: false, insecure: false, include_nics: vec![], exclude_nics: vec![],
             include_mounts: vec![], exclude_mounts: vec![], auto_update: false,
             log_file: None, service_tier: None, config_path: std::path::PathBuf::from("unused"),
             runtime_overrides: Default::default(),
@@ -1071,6 +1088,7 @@ mod tests {
             token: "fixture".into(),
             sample_interval_secs: 5,
             report_interval_secs: 60,
+            report_interval_explicit: false,
             insecure: false,
             include_nics: vec![],
             exclude_nics: vec![],

@@ -105,6 +105,7 @@ mod tests {
             token: token.into(),
             sample_interval_secs: 5,
             report_interval_secs: 60,
+            report_interval_explicit: false,
             insecure: false,
             include_nics: vec![],
             exclude_nics: vec![],

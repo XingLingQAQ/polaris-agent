@@ -6,7 +6,7 @@
 //! run on top. SOCKS is not implemented and is reported, not silently ignored.
 //! WebSocket 代理需要先建 CONNECT 隧道；不支持 SOCKS，遇到会明确报告。
 
-use std::{fmt, io};
+use std::fmt;
 
 use anyhow::{bail, Context as _, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -293,10 +293,7 @@ fn base64(input: &str) -> String {
     out
 }
 
-/// Rewrite a connect error so it names the proxy. / 改写连接错误，标明代理。
-pub fn describe_tunnel_failure(proxy: &Proxy, error: &io::Error) -> String {
-    format!("through proxy {}:{}: {error}", proxy.host, proxy.port)
-}
+
 
 #[cfg(test)]
 mod tests {
